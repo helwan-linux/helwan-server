@@ -473,7 +473,7 @@ class MainWindow(QMainWindow):
         about_text = """
         <h3>About Hel-Web-Server</h3>
         <p>Version: 1.0.0</p>
-        <p>Developed by: Saeed Badrelden & Gemini AI</p>
+        <p>Developed by: Saeed Badrelden</p>
         <p>Hel-Web-Server is a simple local web server utility built with PyQt5.</p>
         <p>Designed to help web developers quickly serve static files for testing purposes.</p>
         <p>Copyright © 2025</p>
