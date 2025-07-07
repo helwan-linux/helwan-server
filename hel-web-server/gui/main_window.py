@@ -13,6 +13,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from server_manager.web_server import WebServer, ServerStopper, ServerStarter
 from server_manager.config import DEFAULT_PORT, SERVER_TYPES
 
+# تعريف المسار المطلق المتوقع للأيقونة بعد التثبيت
+# يجب أن يتطابق هذا مع المسار الذي ينسخ إليه PKGBUILD الأيقونة
+INSTALLED_ICON_PATH = "/usr/share/icons/hicolor/256x256/apps/hel-web-server.png"
+
 class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str)
 
@@ -40,17 +44,26 @@ class MainWindow(QMainWindow):
     def set_window_icon(self):
         """
         Sets the window icon for the application.
+        يبحث عن الأيقونة في المسار المثبت أولاً، ثم في المسار النسبي للتطوير.
         """
-        icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
-
-        try:
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
-            else:
-                pass # لا تطبع رسائل إذا لم يتم العثور على الأيقونة
-        except Exception as e:
-            pass # لا تطبع رسائل عن الأخطاء في الأيقونة
-
+        icon_found = False
+        
+        # 1. حاول البحث عن الأيقونة في المسار المطلق بعد التثبيت
+        if os.path.exists(INSTALLED_ICON_PATH):
+            self.setWindowIcon(QIcon(INSTALLED_ICON_PATH))
+            icon_found = True
+        else:
+            # 2. إذا لم يتم العثور عليها، حاول البحث في المسار النسبي (للتطوير المحلي)
+            # افترض أن 'main_window.py' موجود في 'gui/' وأن 'icon.png' في 'gui/resources/'
+            relative_icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
+            if os.path.exists(relative_icon_path):
+                self.setWindowIcon(QIcon(relative_icon_path))
+                icon_found = True
+            
+        if not icon_found:
+            # يمكنك إضافة طباعة تحذير هنا إذا أردت، ولكن الكود الأصلي كان يتجاهل ذلك
+            pass # لا تطبع رسائل إذا لم يتم العثور على الأيقونة
+        
     def init_ui(self):
         """
         Initializes all UI elements and lays them out.
