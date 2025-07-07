@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=Hel-Web-Server
 Comment=A local web server for development and project hosting.
-Exec=/bin/bash -c "cd /opt/hel-web-server && python3 -m venv venv && source venv/bin/activate && python3 hel_web_server.py"
-Icon=/opt/hel-web-server/gui/resources/icon.png
+Exec=/usr/bin/hel-web-server
+Icon=hel-web-server
 Terminal=false
 Type=Application
 Categories=Development;Network;WebDevelopment;
