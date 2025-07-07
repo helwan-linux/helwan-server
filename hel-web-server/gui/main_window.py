@@ -372,7 +372,18 @@ class MainWindow(QMainWindow):
                 return
 
             # إذا اختار المستخدم نعم، أو إذا لم يكن الخادم يعمل أصلاً
-            if self.stop_thread is None or not self.stop_thread.isRunning():
+            # نستخدم try-except للتعامل بأمان مع حالة أن الـ thread قد يكون تم حذفه
+            stop_thread_is_running = False
+            if self.stop_thread is not None:
+                try:
+                    stop_thread_is_running = isinstance(self.stop_thread, QThread) and self.stop_thread.isRunning()
+                except RuntimeError:
+                    # إذا حدث هذا الخطأ، فهذا يعني أن الكائن قد تم حذفه بالفعل.
+                    # نعتبره غير قيد التشغيل ونمضي قدمًا.
+                    stop_thread_is_running = False
+                    self.stop_thread = None # إعادة تعيينه لتجنب محاولات الوصول المستقبلية
+
+            if not stop_thread_is_running: # إذا لم يكن الـ thread قيد التشغيل أو كان محذوفًا
                 self.stop_thread = QThread()
                 self.stop_worker = ServerStopper(self.server)
                 self.stop_worker.moveToThread(self.stop_thread)
@@ -380,10 +391,8 @@ class MainWindow(QMainWindow):
                 # ربط الإشارات: عند بدء الـ thread، ابدأ العامل (worker)
                 self.stop_thread.started.connect(self.stop_worker.stop_server)
                 
-                # ربط إشارة انتهاء Worker بإنهاء الـ thread الرئيسي للتطبيق
-                # هذا يسمح لـ closeEvent بالانتهاء فورًا بينما يكمل الإيقاف في الخلفية
+                # ربط إشارة انتهاء Worker بإنهاء الـ thread
                 self.stop_worker.finished.connect(self.stop_thread.quit) 
-                self.stop_worker.finished.connect(QApplication.instance().quit) 
                 
                 # تنظيف الـ workers والـ threads
                 self.stop_worker.deleteLater() 
@@ -393,27 +402,29 @@ class MainWindow(QMainWindow):
                 self.stop_thread.start() 
 
                 # الآن نسمح لـ closeEvent بالانتهاء فورًا،
-                # ونتوقع أن يتم إغلاق التطبيق بواسطة إشارة 'finished' من stop_worker
+                # ونتوقع أن يتم إغلاق التطبيق بواسطة إشارة 'finished' من stop_worker (إذا قمت بربطها بـ QApplication.instance().quit في مكان آخر)
                 event.accept() 
                 return 
 
             else:
                 # هذا السيناريو (Thread الإيقاف يعمل بالفعل) يجب أن يكون نادرًا عند الإغلاق المباشر
+                # إذا كان الخيط يعمل بالفعل، اسمح بالإغلاق، وافترض أنه سينهي نفسه لاحقًا
                 event.accept()
                 return
 
         # إذا لم يكن السيرفر يعمل، أو إذا اختار المستخدم عدم إيقافه ووافقنا على الإغلاق
         # التعامل مع QThread الخاص بالبدء (تنظيف احتياطي)
         if self.start_thread is not None:
+            # تحقق مما إذا كان الكائن لا يزال QThread وصالحًا
             try:
-                if self.start_thread.isRunning():
+                if isinstance(self.start_thread, QThread) and self.start_thread.isRunning():
                     self.start_thread.quit() 
-                    self.start_thread.wait(5000) 
+                    self.start_thread.wait(5000) # انتظر بحد أقصى 5 ثوانٍ
             except RuntimeError:
-                pass # تجاهل الخطأ إذا حدث أثناء التنظيف
-            finally:
-                self.start_thread = None
-                self.start_worker = None
+                pass # تجاهل الخطأ إذا حدث أثناء التنظيف (قد يكون تم حذفه بالفعل)
+            # بغض النظر عما إذا كان يعمل أو لا، قم بتنظيف المراجع
+            self.start_thread = None
+            self.start_worker = None
 
         # خطوة أخيرة للتأكد من إيقاف الخادم الرئيسي (كإجراء احتياطي إذا لم يتم إيقافه بالـ thread)
         if self.server.is_running() and self.server.httpd:
