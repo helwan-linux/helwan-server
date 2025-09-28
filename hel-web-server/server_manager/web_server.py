@@ -1,4 +1,3 @@
-
 # server_manager/web_server.py
 import http.server
 import socketserver
@@ -23,196 +22,284 @@ class WebServer(QObject):
         self.server_thread = None
         self.server_type = None
         self.project_path = None
+        self.django_process = None # لعمليات Django/Flask
+        self.php_process = None # 👈🏻 جديد: عملية خادم PHP
         if log_signal:
             self.log_signal = log_signal # نربط الإشارة الموجودة في main_window
 
     def is_running(self):
-        return self.httpd is not None and self.server_thread and self.server_thread.is_alive()
-
-    def get_local_and_ip_addresses(self):
-        addresses = []
-        try:
-            local_ip = "127.0.0.1"
-            hostname = socket.gethostname()
-            ip_address = socket.gethostbyname(hostname)
-
-            addresses.append(f"http://{local_ip}:{self.port}")
-            if ip_address != local_ip:
-                addresses.append(f"http://{ip_address}:{self.port}")
-        except Exception as e:
-            self.log_signal.emit(f"Error getting network addresses: {e}")
-        return addresses
-
-    def start(self, project_path, port, server_type_id):
-        self.project_path = project_path
-        self.port = port
-        self.server_type = SERVER_TYPES.get(server_type_id, "Unknown") # احصل على اسم العرض
-
-        if self.is_running():
-            self.log_signal.emit("Server is already running.")
-            self.server_started.emit(False)
-            return
-
-        # تحقق من توفر المنفذ قبل البدء
-        if not self._is_port_available(self.port):
-            self.log_signal.emit(f"Error: Port {self.port} is already in use.")
-            self.server_started.emit(False)
-            return False
-
-        try:
-            if server_type_id == "http.server":
-                self.log_signal.emit(f"Starting standard HTTP server at {self.project_path} on port {self.port}...")
-                Handler = http.server.SimpleHTTPRequestHandler
-                # لتغيير المجلد الحالي لـ http.server
-                os.chdir(self.project_path)
-                self.httpd = socketserver.TCPServer(("", self.port), Handler)
-                self.server_thread = threading.Thread(target=self.httpd.serve_forever)
-                self.server_thread.daemon = True # يجعل الـ thread يتوقف عند إغلاق البرنامج الرئيسي
-                self.server_thread.start()
-                self.log_signal.emit(f"HTTP Server started successfully on port {self.port}.")
-
-            elif server_type_id == "flask":
-                self.log_signal.emit(f"Starting Flask application at {self.project_path} on port {self.port}...")
-                flask_app_path = os.path.join(self.project_path, 'app.py')
-                if not os.path.exists(flask_app_path):
-                    raise FileNotFoundError(f"Flask app.py not found in {self.project_path}")
-
-                # تشغيل Flask باستخدام subprocess
-                # يجب أن نضمن أن Flask تعرف مكان app.py
-                env = os.environ.copy()
-                env['FLASK_APP'] = flask_app_path
-                env['FLASK_RUN_PORT'] = str(self.port)
-                env['FLASK_RUN_HOST'] = '0.0.0.0' # لجعلها متاحة من الشبكة
-                
-                # استخدام subprocess.Popen لتشغيل Flask في الخلفية
-                # shell=True يمكن أن يكون خطيرًا، لكنه يبسط التشغيل هنا
-                # stdout و stderr لعدم عرض مخرجات Flask في terminal التطبيق
-                self.flask_process = subprocess.Popen(
-                    [sys.executable, "-m", "flask", "run"],
-                    cwd=self.project_path, # تشغيل من مجلد المشروع
-                    env=env,
-                    stdout=subprocess.PIPE, # التقاط الإخراج القياسي
-                    stderr=subprocess.PIPE, # التقاط أخطاء Flask
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0 # لا تظهر نافذة terminal إضافية على ويندوز
-                )
-                self.httpd = True # مجرد علم بأن السيرفر "يعمل" (عملية flask)
-                self.server_thread = threading.Thread(target=self._monitor_flask_process)
-                self.server_thread.daemon = True
-                self.server_thread.start()
-                self.log_signal.emit(f"Flask application started successfully on port {self.port}.")
-
-            elif server_type_id == "django":
-                self.log_signal.emit(f"Starting Django application at {self.project_path} on port {self.port}...")
-                manage_py_path = os.path.join(self.project_path, 'manage.py')
-                if not os.path.exists(manage_py_path):
-                    raise FileNotFoundError(f"Django manage.py not found in {self.project_path}")
-
-                # تشغيل Django باستخدام subprocess
-                self.django_process = subprocess.Popen(
-                    [sys.executable, manage_py_path, "runserver", f"0.0.0.0:{self.port}"],
-                    cwd=self.project_path,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                )
-                self.httpd = True # مجرد علم بأن السيرفر "يعمل" (عملية django)
-                self.server_thread = threading.Thread(target=self._monitor_django_process)
-                self.server_thread.daemon = True
-                self.server_thread.start()
-                self.log_signal.emit(f"Django application started successfully on port {self.port}.")
-
-            else:
-                raise ValueError("Unsupported server type specified.")
-
-            self.server_started.emit(True)
+        if self.httpd is not None and self.server_thread and self.server_thread.is_alive():
             return True
-
-        except FileNotFoundError as e:
-            self.log_signal.emit(f"Error: {e}. Please ensure the project structure is correct for the selected server type.")
-            self.server_started.emit(False)
-            return False
-        except Exception as e:
-            self.log_signal.emit(f"Error starting server: {e}")
-            self.httpd = None # تأكد من أن الحالة هي "متوقف" في حالة الفشل
-            self.server_started.emit(False)
-            return False
-
-    def stop(self):
-        if not self.is_running():
-            self.log_signal.emit("Server is not running.")
-            return
-
-        if self.server_type == "http.server" and self.httpd:
-            self.log_signal.emit("Stopping standard HTTP server...")
-            self.httpd.shutdown()
-            self.httpd.server_close()
-            self.server_thread.join(timeout=2) # انتظر قليلاً حتى ينتهي الـ thread
-            self.log_signal.emit("HTTP Server stopped successfully.")
-        
-        elif self.server_type == "flask" and hasattr(self, 'flask_process') and self.flask_process.poll() is None:
-            self.log_signal.emit("Stopping Flask application...")
-            # Flask لا يوفر طريقة إيقاف أنيقة عبر subprocess، نضطر لإنهاء العملية
-            self.flask_process.terminate()
-            self.flask_process.wait(timeout=5) # انتظر حتى تنتهي العملية
-            if self.flask_process.poll() is None: # إذا لم تنتهِ، اقتلها
-                self.flask_process.kill()
-            self.log_signal.emit("Flask application stopped.")
-
-        elif self.server_type == "django" and hasattr(self, 'django_process') and self.django_process.poll() is None:
-            self.log_signal.emit("Stopping Django application...")
-            # Django لا يوفر طريقة إيقاف أنيقة عبر subprocess، نضطر لإنهاء العملية
-            self.django_process.terminate()
-            self.django_process.wait(timeout=5) # انتظر حتى تنتهي العملية
-            if self.django_process.poll() is None: # إذا لم تنتهِ، اقتلها
-                self.django_process.kill()
-            self.log_signal.emit("Django application stopped.")
-        
-        else:
-            self.log_signal.emit("Unknown server type or process not found. Attempting generic cleanup.")
-
-        self.httpd = None
-        self.server_thread = None
-        # إعادة المجلد الحالي إلى مجلد البرنامج الأصلي بعد إيقاف http.server
-        # (فقط إذا كنا قد غيرناه)
-        if self.server_type == "http.server" and self.project_path:
-            os.chdir(os.path.dirname(os.path.abspath(__file__))) # العودة إلى مجلد server_manager
-            os.chdir("..") # ثم العودة إلى المجلد الرئيسي للمشروع
-
+        if self.django_process:
+            return True
+        if self.php_process:
+            return True # 👈🏻 جديد: حالة PHP
+        return False
+    
+    # ... (دوال مساعدة أخرى مثل get_local_and_ip_addresses و _is_port_available) ...
+    
+    def _get_project_name(self, project_path):
+        return os.path.basename(project_path)
 
     def _is_port_available(self, port):
-        """
-        Checks if a given port is available.
-        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", port))
+                # نستخدم 0.0.0.0 للاختبار على جميع الواجهات
+                s.bind(("0.0.0.0", port))
                 return True
-            except OSError:
+            except socket.error:
                 return False
 
-    def _monitor_flask_process(self):
-        """Monitors the Flask subprocess output."""
-        if hasattr(self, 'flask_process') and self.flask_process:
-            for line in iter(self.flask_process.stderr.readline, b''):
-                self.log_signal.emit(f"[Flask]: {line.decode().strip()}")
-            self.flask_process.stderr.close()
-            # Once the process ends, update status
-            self.log_signal.emit("Flask process terminated.")
-            self.httpd = None # Mark as stopped
-            self.server_thread = None
+    def start(self, project_path, port, server_type_id):
+        # 1. إيقاف أي خادم يعمل حالياً
+        self.stop() 
+        
+        # 2. فحص توفر المنفذ
+        if not self._is_port_available(port):
+            self.log_signal.emit(f"Error: Port {port} is already in use. Please choose another port.")
+            self.server_started.emit(False)
+            return False
 
-    def _monitor_django_process(self):
-        """Monitors the Django subprocess output."""
-        if hasattr(self, 'django_process') and self.django_process:
-            for line in iter(self.django_process.stderr.readline, b''):
-                self.log_signal.emit(f"[Django]: {line.decode().strip()}")
-            self.django_process.stderr.close()
-            # Once the process ends, update status
-            self.log_signal.emit("Django process terminated.")
-            self.httpd = None # Mark as stopped
-            self.server_thread = None
+        self.port = port
+        self.server_type = server_type_id
+        self.project_path = project_path
 
-# Workers for QThreads (same as before, just included for completeness)
+        self.log_signal.emit(f"Attempting to start server type: {SERVER_TYPES.get(server_type_id, server_type_id)} on port {port}")
+        
+        if server_type_id == "http.server":
+            try:
+                os.chdir(project_path)
+                Handler = http.server.SimpleHTTPRequestHandler
+                self.httpd = socketserver.TCPServer(("", port), Handler)
+                self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+                self.server_thread.start()
+                self.log_signal.emit(f"Static File Server running at {self.get_local_and_ip_addresses()[0]}")
+                self.server_started.emit(True)
+                return True
+            except Exception as e:
+                self.log_signal.emit(f"Failed to start http.server: {e}")
+                self.httpd = None
+                self.server_started.emit(False)
+                return False
+
+        elif server_type_id == "flask":
+            # منطق Flask (افتراضي)
+            self.log_signal.emit("Starting Flask Application (assuming 'app.py' or equivalent)...")
+            try:
+                flask_file = os.path.join(project_path, 'app.py') 
+                if not os.path.exists(flask_file) and not os.path.exists(os.path.join(project_path, 'wsgi.py')):
+                    self.log_signal.emit(f"Error: Could not find main Flask file (e.g., app.py) in {project_path}")
+                    self.server_started.emit(False)
+                    return False
+                    
+                command = [
+                    sys.executable,
+                    '-m', 
+                    'flask',
+                    'run',
+                    '--host', '0.0.0.0', 
+                    '--port', str(port)
+                ]
+                
+                env = os.environ.copy()
+                env['FLASK_APP'] = os.path.basename(flask_file) if os.path.exists(flask_file) else os.path.basename(os.path.join(project_path, 'wsgi.py'))
+
+                self.django_process = subprocess.Popen(
+                    command,
+                    cwd=project_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env
+                )
+
+                threading.Thread(target=self._monitor_django_logs, daemon=True).start()
+                self.log_signal.emit(f"Flask Server running at http://0.0.0.0:{port}")
+                self.server_started.emit(True)
+                return True
+            except Exception as e:
+                self.log_signal.emit(f"Failed to start Flask server: {e}")
+                self.django_process = None
+                self.server_started.emit(False)
+                return False
+
+        elif server_type_id == "django":
+            # منطق Django (افتراضي)
+            self.log_signal.emit(f"Starting Django Application in '{self._get_project_name(project_path)}'...")
+            try:
+                command = [
+                    sys.executable,
+                    'manage.py', 
+                    'runserver', 
+                    f'0.0.0.0:{port}'
+                ]
+                
+                self.django_process = subprocess.Popen(
+                    command,
+                    cwd=project_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                threading.Thread(target=self._monitor_django_logs, daemon=True).start()
+                self.log_signal.emit(f"Django Server running at http://0.0.0.0:{port}")
+                self.server_started.emit(True)
+                return True
+            except FileNotFoundError:
+                self.log_signal.emit("Error: Python interpreter or 'manage.py' not found. Ensure you are in the correct Django project directory.")
+                self.django_process = None
+                self.server_started.emit(False)
+                return False
+            except Exception as e:
+                self.log_signal.emit(f"Failed to start Django server: {e}")
+                self.django_process = None
+                self.server_started.emit(False)
+                return False
+
+        elif server_type_id == "php_server": # 👈🏻 منطق تشغيل PHP
+            self.log_signal.emit("Starting PHP Built-in Server...")
+            self.project_path = project_path
+            self._run_php_server(port, project_path)
+            self.server_started.emit(self.php_process is not None)
+            return self.php_process is not None
+
+        else:
+            self.log_signal.emit(f"Error: Unknown server type ID: {server_type_id}")
+            self.server_started.emit(False)
+            return False
+
+    # -----------------------------------------------------------
+    # دوال خاصة بخادم PHP
+    # -----------------------------------------------------------
+
+    def _run_php_server(self, port, doc_root):
+        """Runs the PHP built-in server in a subprocess and monitors its output."""
+        try:
+            # الأمر: php -S 0.0.0.0:PORT -t DOC_ROOT
+            host = "0.0.0.0"
+            command = [
+                "php",
+                "-S",
+                f"{host}:{port}",
+                "-t",
+                doc_root
+            ]
+
+            self.php_process = subprocess.Popen(
+                command,
+                cwd=doc_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1, # Line buffering
+                universal_newlines=True
+            )
+            self.log_signal.emit(f"PHP Server running at http://{host}:{port}")
+            self.log_signal.emit(f"Document Root: {doc_root}")
+            
+            # تشغيل مراقبة السجلات في خيط منفصل
+            self.server_thread = threading.Thread(target=self._monitor_php_logs, daemon=True)
+            self.server_thread.start()
+
+        except FileNotFoundError:
+            self.log_signal.emit("Error: 'php' command not found. Please ensure PHP CLI is installed and in your system's PATH.")
+            self.php_process = None
+            return False
+        except Exception as e:
+            self.log_signal.emit(f"Failed to start PHP server: {e}")
+            self.php_process = None
+            return False
+
+        return True
+
+    def _monitor_php_logs(self):
+        """Monitors stdout and stderr for the PHP server process."""
+        try:
+            if self.php_process and self.php_process.stdout:
+                # قراءة المخرجات القياسية
+                for line in iter(self.php_process.stdout.readline, ''):
+                    if line:
+                        self.log_signal.emit(f"[PHP]: {line.strip()}")
+
+            if self.php_process and self.php_process.stderr:
+                # قراءة سجلات الأخطاء والوصول (عادةً ما تظهر سجلات الوصول هنا)
+                for line in iter(self.php_process.stderr.readline, ''):
+                    if line:
+                        self.log_signal.emit(f"[PHP-LOG]: {line.strip()}")
+
+        except Exception as e:
+            self.log_signal.emit(f"[PHP Monitor Error]: {e}")
+        finally:
+            if self.php_process:
+                self.php_process.wait() # انتظار انتهاء العملية
+                if self.php_process.stdout:
+                    self.php_process.stdout.close()
+                if self.php_process.stderr:
+                    self.php_process.stderr.close()
+            
+            self.log_signal.emit("PHP process terminated.")
+            self.php_process = None
+
+    # -----------------------------------------------------------
+    # دوال موجودة (افتراضية)
+    # -----------------------------------------------------------
+
+    def _monitor_django_logs(self):
+        """Monitors stdout and stderr for Django/Flask process (assuming Django is used for both)."""
+        # منطق مراقبة سجلات Django/Flask 
+        try:
+            for line in self.django_process.stdout:
+                self.log_signal.emit(f"[SERVER]: {line.decode().strip()}")
+            for line in self.django_process.stderr:
+                self.log_signal.emit(f"[SERVER-ERR]: {line.decode().strip()}")
+        except Exception as e:
+            self.log_signal.emit(f"[Monitor Error]: {e}")
+        finally:
+            if self.django_process:
+                self.django_process.wait()
+                self.django_process.stdout.close()
+                self.django_process.stderr.close()
+                self.log_signal.emit("Django/Flask process terminated.")
+                self.django_process = None
+
+    def stop(self):
+        """St stops the currently running web server."""
+        self.server_started.emit(False)
+
+        # 1. إيقاف http.server
+        if self.httpd:
+            self.log_signal.emit("Stopping Static File Server...")
+            self.httpd.shutdown()
+            self.server_thread.join()
+            self.httpd = None
+            self.server_thread = None
+            self.log_signal.emit("Static File Server stopped.")
+
+        # 2. إيقاف عملية Django/Flask
+        if self.django_process:
+            self.log_signal.emit("Stopping Django/Flask Server...")
+            try:
+                self.django_process.terminate()
+                self.django_process.wait(timeout=5)
+            except:
+                self.django_process.kill()
+            self.django_process = None
+            self.log_signal.emit("Django/Flask Server stopped.")
+            
+        # 3. إيقاف عملية PHP 👈🏻 منطق إيقاف PHP
+        if self.php_process:
+            self.log_signal.emit("Stopping PHP Server...")
+            try:
+                self.php_process.terminate()
+                self.php_process.wait(timeout=5)
+            except:
+                self.php_process.kill()
+            self.php_process = None
+            self.log_signal.emit("PHP Server stopped.")
+            
+        self.log_signal.emit("Server stopped successfully.")
+
+
+# Workers for QThreads (نفس الدوال المساعدة الأصلية)
 class ServerStarter(QObject):
     finished = pyqtSignal(bool)
     error = pyqtSignal(str)
