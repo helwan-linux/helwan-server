@@ -215,6 +215,7 @@ class WebServer(QObject):
                 f"{host}:{port}",
                 "-t",
                 doc_root
+                # "router.php"  # <--- تأكد من إزالة هذا العنصر أو وضعه كتعليق
             ]
 
             self.php_process = subprocess.Popen(
@@ -225,7 +226,7 @@ class WebServer(QObject):
                 text=True,
                 bufsize=1, 
                 universal_newlines=True,
-                shell=True # 🚨 الإصلاح الحاسم 🚨
+                shell=True 
             )
             
             time.sleep(2)
