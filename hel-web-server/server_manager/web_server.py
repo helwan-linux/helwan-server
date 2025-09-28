@@ -225,7 +225,7 @@ class WebServer(QObject):
                 text=True,
                 bufsize=1, 
                 universal_newlines=True,
-                shell=False
+                shell=True # 🚨 الإصلاح الحاسم 🚨
             )
             
             time.sleep(2)
