@@ -1,6 +1,6 @@
-# Maintainer: سعيد <saeed@example.com>
+# Maintainer:Saeed  Badrelden <helwanlinux@gmail.com>
 pkgname=hel-web-server
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="A simple web server utility for Helwan Linux, supporting various server types like Django and Flask."
 arch=('any')
