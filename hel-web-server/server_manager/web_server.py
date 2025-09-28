@@ -224,10 +224,9 @@ class WebServer(QObject):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1, 
-                universal_newlines=True,
-                shell=True 
+                bufsize=1
             )
+
             
             time.sleep(2)
             if self.php_process.poll() is not None:
@@ -379,3 +378,4 @@ class ServerStopper(QObject):
         except Exception as e:
             self.error.emit(f"Failed to stop server: {e}")
             self.finished.emit()
+
