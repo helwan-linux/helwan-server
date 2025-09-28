@@ -18,7 +18,7 @@ class WebServer(QObject):
     def __init__(self, port=DEFAULT_PORT, log_signal=None):
         super().__init__()
         self.port = port
-        self.httpd = None # لم يعد يستخدم لخادم http.server
+        self.httpd = None 
         self.server_thread = None
         self.server_type = None
         self.project_path = None
@@ -253,48 +253,67 @@ class WebServer(QObject):
 
     def _monitor_php_logs(self):
         """Monitors stdout and stderr for the PHP server process."""
+        # FIX: استخدام مرجع محلي لتجنب سباق الشروط (Race Condition)
+        process = self.php_process 
+        if process is None:
+            return
+
         try:
-            if self.php_process and self.php_process.stdout:
-                for line in iter(self.php_process.stdout.readline, ''):
+            if process.stdout:
+                for line in iter(process.stdout.readline, ''):
                     if line:
                         self.log_signal.emit(f"[PHP]: {line.strip()}")
 
-            if self.php_process and self.php_process.stderr:
-                for line in iter(self.php_process.stderr.readline, ''):
+            if process.stderr:
+                for line in iter(process.stderr.readline, ''):
                     if line:
                         self.log_signal.emit(f"[PHP-LOG]: {line.strip()}")
 
         except Exception as e:
             self.log_signal.emit(f"[PHP Monitor Error]: {e}")
         finally:
-            if self.php_process:
-                self.php_process.wait()
-                if self.php_process.stdout:
-                    self.php_process.stdout.close()
-                if self.php_process.stderr:
-                    self.php_process.stderr.close()
+            if process:
+                process.wait()
+                if process.stdout:
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
             
             self.log_signal.emit("PHP process terminated.")
-            self.php_process = None
-            # لا نرسل إشارة server_started=False هنا، بل نعتمد على زر Stop
-
+            
+            # FIX: شرط إضافي قبل تعيين المتغير العام لـ None
+            if self.php_process is process:
+                self.php_process = None
+            
     def _monitor_django_logs(self):
         """Monitors stdout and stderr for Django/Flask/Static process."""
+        # FIX: استخدام مرجع محلي لتجنب سباق الشروط (Race Condition)
+        process = self.django_process
+        if process is None:
+            return
+            
         try:
-            if self.django_process:
-                for line in self.django_process.stdout:
+            if process.stdout:
+                for line in process.stdout:
                     self.log_signal.emit(f"[SERVER]: {line.decode().strip()}")
-                for line in self.django_process.stderr:
+            if process.stderr:
+                for line in process.stderr:
                     self.log_signal.emit(f"[SERVER-ERR]: {line.decode().strip()}")
         except Exception as e:
             self.log_signal.emit(f"[Monitor Error]: {e}")
         finally:
-            if self.django_process:
-                self.django_process.wait()
-                self.django_process.stdout.close()
-                self.django_process.stderr.close()
+            if process:
+                process.wait()
+                # التأكد من وجود stdout/stderr قبل الإغلاق
+                if process.stdout: 
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
                 self.log_signal.emit("Python Server Process terminated.")
-                self.django_process = None
+                
+                # FIX: شرط إضافي قبل تعيين المتغير العام لـ None
+                if self.django_process is process: 
+                    self.django_process = None
 
     def stop(self):
         """Stops the currently running web server."""
@@ -308,7 +327,7 @@ class WebServer(QObject):
                 self.django_process.wait(timeout=5)
             except:
                 self.django_process.kill()
-            self.django_process = None
+            self.django_process = None # يتم تعيينه لـ None لتجنب رؤية عملية قديمة في start()
             self.log_signal.emit("Python Server Process stopped.")
             
         # 2. إيقاف عملية PHP
@@ -324,7 +343,7 @@ class WebServer(QObject):
             
         self.log_signal.emit("Server stopped successfully.")
 
-# Workers for QThreads (نفس الدوال المساعدة الأصلية)
+# Workers for QThreads (دوال مساعدة لـ PyQt5)
 class ServerStarter(QObject):
     finished = pyqtSignal(bool)
     error = pyqtSignal(str)
