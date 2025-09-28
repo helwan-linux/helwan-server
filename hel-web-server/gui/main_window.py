@@ -8,13 +8,14 @@ from PyQt5.QtCore import Qt, QSize, QUrl, pyqtSignal, QThread
 
 import os
 import sys
+import socket
+import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from server_manager.web_server import WebServer, ServerStopper, ServerStarter
 from server_manager.config import DEFAULT_PORT, SERVER_TYPES
 
 # تعريف المسار المطلق المتوقع للأيقونة بعد التثبيت
-# يجب أن يتطابق هذا مع المسار الذي ينسخ إليه PKGBUILD الأيقونة
 INSTALLED_ICON_PATH = "/usr/share/icons/hicolor/256x256/apps/hel-web-server.png"
 
 class MainWindow(QMainWindow):
@@ -28,439 +29,301 @@ class MainWindow(QMainWindow):
         self.set_window_icon()
 
         self.server = WebServer(port=DEFAULT_PORT, log_signal=self.log_signal)
+        self.selected_folder = os.getcwd()
+        self.current_port = DEFAULT_PORT
+        self.is_server_running = False
 
-        self.selected_folder = ""
+        self.setup_ui()
+        self.setup_connections()
+        self.update_status_display(False) # إعداد الحالة الابتدائية
+        
+        # ربط الإشارة بالدالة التي تقوم بعرض السجلات
+        self.server.log_signal.connect(self.update_logs)
+        self.server.server_started.connect(self.update_status_display)
+        
+        # تعبئة قائمة أنواع الخوادم بعد تهيئة الـ QComboBox
+        self.populate_server_types()
 
-        # تهيئة متغيرات QThread و Workers
-        self.stop_thread = None
-        self.stop_worker = None
-        self.start_thread = None
-        self.start_worker = None
-
-        self.init_ui()
-        self.log_signal.connect(self.append_log)
-        self.update_ui_state()
+    # ----------------------------------------------------------------------
+    # UI Setup & Configuration
+    # ----------------------------------------------------------------------
 
     def set_window_icon(self):
-        """
-        Sets the window icon for the application.
-        يبحث عن الأيقونة في المسار المثبت أولاً، ثم في المسار النسبي للتطوير.
-        """
-        icon_found = False
-        
-        # 1. حاول البحث عن الأيقونة في المسار المطلق بعد التثبيت
+        """Sets the window icon based on environment."""
+        # محاولة تحميل الأيقونة من المسار المطلق (للتثبيت)
         if os.path.exists(INSTALLED_ICON_PATH):
             self.setWindowIcon(QIcon(INSTALLED_ICON_PATH))
-            icon_found = True
         else:
-            # 2. إذا لم يتم العثور عليها، حاول البحث في المسار النسبي (للتطوير المحلي)
-            # افترض أن 'main_window.py' موجود في 'gui/' وأن 'icon.png' في 'gui/resources/'
-            relative_icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
-            if os.path.exists(relative_icon_path):
-                self.setWindowIcon(QIcon(relative_icon_path))
-                icon_found = True
-            
-        if not icon_found:
-            # يمكنك إضافة طباعة تحذير هنا إذا أردت، ولكن الكود الأصلي كان يتجاهل ذلك
-            pass # لا تطبع رسائل إذا لم يتم العثور على الأيقونة
-        
-    def init_ui(self):
-        """
-        Initializes all UI elements and lays them out.
-        """
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+            # محاولة تحميل الأيقونة من المسار النسبي (للتطوير)
+            icon_path = os.path.join(os.path.dirname(__file__), 'resources', 'icon.png')
+            if os.path.exists(icon_path):
+                 self.setWindowIcon(QIcon(icon_path))
 
+    def setup_ui(self):
+        """Sets up the main structure of the user interface."""
+        main_widget = QWidget()
         main_layout = QVBoxLayout()
+        
+        # 1. إعدادات الخادم
+        settings_group = QGroupBox("Server Settings")
+        settings_layout = QFormLayout()
+        
+        self.folder_label = QLabel(self.selected_folder)
+        self.folder_label.setToolTip("Project Path")
+        self.browse_button = QPushButton("Browse")
+        
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(self.folder_label)
+        folder_layout.addWidget(self.browse_button)
 
-        # إنشاء شريط القوائم (MenuBar)
-        menubar = self.menuBar()
+        self.port_input = QLineEdit(str(DEFAULT_PORT))
+        self.port_input.setFixedWidth(100)
+        self.port_input.setAlignment(Qt.AlignCenter)
+        self.port_input.setValidator(self.create_port_validator()) # افتراض وجود دالة تحقق
 
-        # إنشاء قائمة "مساعدة" (Help Menu)
-        help_menu = menubar.addMenu('Help')
+        self.server_type_combo = QComboBox() # 👈🏻 تعريف القائمة المنسدلة
 
-        # إضافة إجراء "شرح استخدام البرنامج" (Help Content Action)
-        help_action = QAction('Help Content', self)
+        settings_layout.addRow(QLabel("Project Folder:"), folder_layout)
+        settings_layout.addRow(QLabel("Port:"), self.port_input)
+        settings_layout.addRow(QLabel("Server Type:"), self.server_type_combo)
+
+        self.start_button = QPushButton("Start Server")
+        self.stop_button = QPushButton("Stop Server")
+        
+        action_layout = QHBoxLayout()
+        action_layout.addWidget(self.start_button)
+        action_layout.addWidget(self.stop_button)
+        settings_layout.addRow(action_layout)
+
+        settings_group.setLayout(settings_layout)
+        
+        # 2. حالة الخادم
+        status_group = QGroupBox("Server Status")
+        status_layout = QFormLayout()
+
+        self.status_indicator = QLabel("Stopped")
+        self.status_indicator.setStyleSheet("color: red; font-weight: bold;")
+        
+        self.address_label = QLabel("N/A")
+        self.address_label.setOpenExternalLinks(True)
+
+        status_layout.addRow(QLabel("Status:"), self.status_indicator)
+        status_layout.addRow(QLabel("Address:"), self.address_label)
+
+        status_group.setLayout(status_layout)
+
+        # 3. السجلات
+        logs_group = QGroupBox("Server Logs")
+        logs_layout = QVBoxLayout()
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        logs_layout.addWidget(self.log_display)
+        logs_group.setLayout(logs_layout)
+
+        # دمج الأجزاء
+        main_layout.addWidget(settings_group)
+        main_layout.addWidget(status_group)
+        main_layout.addWidget(logs_group)
+        
+        main_widget.setLayout(main_layout)
+        self.setCentralWidget(main_widget)
+        
+        self.create_menus() # افتراض وجود دالة لإنشاء القوائم
+
+    def populate_server_types(self): # 👈🏻 الدالة الجديدة لتعبئة القائمة
+        """Fills the server type dropdown with supported server names."""
+        self.server_type_combo.clear()
+        # إضافة جميع أنواع الخوادم من قاموس SERVER_TYPES
+        for name in SERVER_TYPES.keys():
+            self.server_type_combo.addItem(name)
+
+        # تحديد أول خيار افتراضياً
+        if self.server_type_combo.count() > 0:
+            self.server_type_combo.setCurrentIndex(0)
+
+    # ----------------------------------------------------------------------
+    # Signal Connections
+    # ----------------------------------------------------------------------
+
+    def setup_connections(self):
+        """Connects UI elements to their respective functions."""
+        self.browse_button.clicked.connect(self.select_folder)
+        self.start_button.clicked.connect(self.start_server_thread)
+        self.stop_button.clicked.connect(self.stop_server_thread)
+        self.port_input.textChanged.connect(self.update_port)
+        
+    # ----------------------------------------------------------------------
+    # Business Logic
+    # ----------------------------------------------------------------------
+
+    def select_folder(self):
+        """Opens a file dialog to select the project folder."""
+        # نستخدم QFileDialog.getExistingDirectory للسماح للمستخدم باختيار مجلد
+        folder = QFileDialog.getExistingDirectory(self, "Select Project Folder", self.selected_folder)
+        if folder:
+            self.selected_folder = folder
+            self.folder_label.setText(self.selected_folder)
+            self.update_logs(f"Selected project folder: {self.selected_folder}")
+
+    def update_port(self, text):
+        """Updates the port number from the input field."""
+        try:
+            self.current_port = int(text)
+        except ValueError:
+            # يمكن تجاهل هذا إذا كان هناك Validator، لكن الأمان أفضل
+            pass 
+
+    def start_server_thread(self):
+        """Prepares to start the server in a separate thread."""
+        if self.is_server_running:
+            QMessageBox.warning(self, "Warning", "Server is already running.")
+            return
+
+        project_path = self.selected_folder
+        port = self.current_port
+        server_type_name = self.server_type_combo.currentText()
+        # البحث عن المعرف الداخلي (ID) بناءً على الاسم المعروض
+        server_type_id = SERVER_TYPES.get(server_type_name)
+
+        if not project_path:
+            QMessageBox.critical(self, "Error", "Please select a project folder.")
+            return
+            
+        if not server_type_id:
+            self.update_logs(f"Error: Could not find ID for server type {server_type_name}")
+            return
+
+        self.log_display.clear()
+        self.update_logs(f"Starting server in thread... Project: {project_path}, Port: {port}, Type: {server_type_name}")
+
+        # إنشاء Thread و Worker
+        self.thread = QThread()
+        self.worker = ServerStarter(self.server, project_path, port, server_type_id)
+        
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.start_server)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.worker.error.connect(self.handle_server_error)
+        
+        self.thread.start()
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.is_server_running = True
+
+
+    def stop_server_thread(self):
+        """Stops the server in a separate thread."""
+        if not self.is_server_running:
+            QMessageBox.warning(self, "Warning", "Server is not running.")
+            return
+
+        self.update_logs("Stopping server in thread...")
+        
+        # إنشاء Thread و Worker للإيقاف
+        self.stop_thread = QThread()
+        self.stop_worker = ServerStopper(self.server)
+        
+        self.stop_worker.moveToThread(self.stop_thread)
+        self.stop_thread.started.connect(self.stop_worker.stop_server)
+        self.stop_worker.finished.connect(self.stop_thread.quit)
+        self.stop_worker.finished.connect(self.stop_worker.deleteLater)
+        self.stop_thread.finished.connect(self.stop_thread.deleteLater)
+        self.stop_worker.error.connect(self.handle_server_error)
+        
+        self.stop_thread.start()
+        self.start_button.setEnabled(False) # تعطيل زر البدء مؤقتاً
+        self.stop_button.setEnabled(False) # تعطيل زر الإيقاف مؤقتاً
+        self.is_server_running = False # سيتم تحديث الحالة النهائية في update_status_display
+
+    def handle_server_error(self, message):
+        """Handles and displays server-related errors."""
+        QMessageBox.critical(self, "Server Error", message)
+        self.update_logs(f"[FATAL ERROR]: {message}")
+        self.update_status_display(False) # تأكد من إيقاف العرض بعد الخطأ
+
+    # ----------------------------------------------------------------------
+    # UI Updates (Slots)
+    # ----------------------------------------------------------------------
+
+    def update_logs(self, message):
+        """Appends a new message to the log display."""
+        timestamp = time.strftime("[%H:%M:%S]")
+        self.log_display.append(f"{timestamp} {message}")
+        
+    def update_status_display(self, started):
+        """Updates the status indicator and address labels."""
+        self.is_server_running = started
+        self.start_button.setEnabled(not started)
+        self.stop_button.setEnabled(started)
+        
+        if started:
+            self.status_indicator.setText("Running")
+            self.status_indicator.setStyleSheet("color: green; font-weight: bold;")
+            
+            addresses = self.server.get_local_and_ip_addresses()
+            address_html = "<br>".join([f'<a href="{addr}">{addr}</a>' for addr in addresses])
+            self.address_label.setText(address_html)
+            self.update_logs(f"Server is LIVE at: {addresses[0]}")
+        else:
+            self.status_indicator.setText("Stopped")
+            self.status_indicator.setStyleSheet("color: red; font-weight: bold;")
+            self.address_label.setText("N/A")
+            
+    # ----------------------------------------------------------------------
+    # Helper Methods (Menus, Validators, etc.)
+    # ----------------------------------------------------------------------
+    
+    def create_port_validator(self):
+        """Creates a QIntValidator for the port input field."""
+        from PyQt5.QtGui import QIntValidator
+        return QIntValidator(1025, 65535, self) # المنافذ التي يمكن للمستخدم العادي استخدامها
+
+    def create_menus(self):
+        """Creates the menu bar and actions."""
+        # File Menu
+        file_menu = self.menuBar().addMenu("&File")
+        
+        select_action = QAction("Select Folder...", self)
+        select_action.triggered.connect(self.select_folder)
+        file_menu.addAction(select_action)
+        
+        exit_action = QAction("&Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # Help Menu
+        help_menu = self.menuBar().addMenu("&Help")
+        
+        help_action = QAction("&Usage Guide", self)
         help_action.triggered.connect(self.show_help_dialog)
         help_menu.addAction(help_action)
-
-        # إضافة فاصل بين الخيارات
-        help_menu.addSeparator()
-
-        # إضافة إجراء "حول البرنامج" (About Action)
-        about_action = QAction('About', self)
+        
+        about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
 
-        # 1. Folder & Port Selection Group
-        settings_group = QGroupBox("Server Settings")
-        settings_layout = QFormLayout()
-
-        # Folder selection
-        folder_selection_layout = QHBoxLayout()
-        self.folder_label = QLabel("No project folder selected.")
-        self.folder_label.setWordWrap(True)
-        folder_selection_layout.addWidget(self.folder_label, 1)
-
-        select_folder_button = QPushButton("Select Folder")
-        select_folder_button.clicked.connect(self.select_folder)
-        folder_selection_layout.addWidget(select_folder_button)
-
-        open_folder_button = QPushButton("Open Folder")
-        open_folder_button.clicked.connect(self.open_selected_folder)
-        open_folder_button.setEnabled(False)
-        self.open_folder_button = open_folder_button
-        folder_selection_layout.addWidget(open_folder_button)
-
-        settings_layout.addRow("Project Folder:", folder_selection_layout)
-
-        # Port input
-        self.port_input = QLineEdit(str(DEFAULT_PORT))
-        self.port_input.setPlaceholderText("Enter port number (e.g., 8000)")
-        self.port_input.setFixedWidth(100)
-        settings_layout.addRow("Port:", self.port_input)
-
-        # Server Type selection
-        self.server_type_combo = QComboBox()
-        # إضافة المفاتيح (الأسماء المعروضة) إلى القائمة المنسدلة
-        self.server_type_combo.addItems(SERVER_TYPES.keys())
-        settings_layout.addRow("Server Type:", self.server_type_combo)
-
-        settings_group.setLayout(settings_layout)
-        main_layout.addWidget(settings_group)
-
-
-        # 2. Server Control Buttons Group
-        control_group = QGroupBox("Server Control")
-        server_control_layout = QHBoxLayout()
-
-        self.start_button = QPushButton("Start Server")
-        self.start_button.setEnabled(False)
-        self.start_button.clicked.connect(self.start_server_clicked)
-        server_control_layout.addWidget(self.start_button)
-
-        self.stop_button = QPushButton("Stop Server")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_server_clicked)
-        server_control_layout.addWidget(self.stop_button)
-
-        control_group.setLayout(server_control_layout)
-        main_layout.addWidget(control_group)
-
-        # 3. Server Status and Address
-        status_address_group = QGroupBox("Server Status")
-        status_address_layout = QVBoxLayout()
-
-        self.status_label = QLabel("Status: Stopped")
-        status_address_layout.addWidget(self.status_label)
-
-        self.address_label = QLabel("Address: Not Available")
-        self.address_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        # لا نربط هنا بشكل مباشر لأنه يمكن أن يكون هناك أكثر من رابط
-        status_address_layout.addWidget(self.address_label)
-
-        status_address_group.setLayout(status_address_layout)
-        main_layout.addWidget(status_address_group)
-
-        # 4. Logging Area
-        log_group = QGroupBox("Server Logs")
-        log_layout = QVBoxLayout()
-        self.log_text_edit = QTextEdit()
-        self.log_text_edit.setReadOnly(True)
-        log_layout.addWidget(self.log_text_edit)
-        log_group.setLayout(log_layout)
-        main_layout.addWidget(log_group, 1)
-
-        central_widget.setLayout(main_layout)
-        self.update_ui_state()
-
-    def select_folder(self):
-        """
-        Opens a dialog to select the project folder.
-        """
-        folder = QFileDialog.getExistingDirectory(self, "Select Project Folder", os.path.expanduser("~"))
-        if folder:
-            self.selected_folder = folder
-            self.folder_label.setText(f"Project Folder: {self.selected_folder}")
-            self.update_ui_state()
-        else:
-            self.update_ui_state()
-
-    def open_selected_folder(self):
-        """
-        Opens the currently selected project folder in the default file manager.
-        """
-        if self.selected_folder and os.path.exists(self.selected_folder):
-            try:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(self.selected_folder))
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not open folder: {e}")
-        else:
-            QMessageBox.warning(self, "Warning", "No valid folder selected to open.")
-
-    def start_server_clicked(self):
-        """
-        Handles the 'Start Server' button click, running the server start in a separate thread.
-        """
-        if not self.selected_folder:
-            QMessageBox.warning(self, "Error", "Please select a project folder first.")
-            return
-
-        try:
-            port = int(self.port_input.text())
-            if not (1024 <= port <= 65535):
-                QMessageBox.warning(self, "Invalid Port", "Port number must be between 1024 and 65535.")
-                return
-        except ValueError:
-            QMessageBox.warning(self, "Invalid Port", "Please enter a valid number for the port.")
-            return
-
-        selected_display_name = self.server_type_combo.currentText()
-        server_type_id = SERVER_TYPES.get(selected_display_name)
-
-        self.append_log(f"Attempting to start '{selected_display_name}' server on port {port} from {self.selected_folder}")
-
-        # تهيئة QThread و Worker لبدء الخادم
-        self.start_thread = QThread()
-        self.start_worker = ServerStarter(self.server, self.selected_folder, port, server_type_id)
-        self.start_worker.moveToThread(self.start_thread)
-
-        # ربط الإشارات (signals)
-        self.start_thread.started.connect(self.start_worker.start_server)
-        self.start_worker.finished.connect(self.on_server_started)
-        self.start_worker.error.connect(self.on_server_start_error)
-        self.start_worker.finished.connect(self.start_thread.quit) # إيقاف الـ thread بعد انتهاء الـ worker
-        self.start_worker.deleteLater() # حذف الـ worker عندما لا يكون مطلوبًا بعد الآن
-        self.start_thread.finished.connect(self.start_thread.deleteLater) # حذف الـ thread عندما ينتهي
-
-        # تعطيل الأزرار أثناء عملية البدء
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(False)
-        self.port_input.setEnabled(False)
-        self.server_type_combo.setEnabled(False)
-        self.append_log("Starting server in background...")
-
-        self.start_thread.start()
-
-    def on_server_started(self, success):
-        """
-        تُستدعى بعد انتهاء محاولة بدء الخادم.
-        """
-        self.update_ui_state() # لتحديث حالة الأزرار والعناوين بعد انتهاء العملية
-
-        if success:
-            pass
-        # رسالة الخطأ يتم التعامل معها بواسطة on_server_start_error
-
-    def on_server_start_error(self, message):
-        """
-        تُستدعى في حالة حدوث خطأ أثناء بدء الخادم.
-        """
-        QMessageBox.critical(self, "Server Start Error", message)
-        self.update_ui_state() # تحديث الواجهة الرسومية حتى لو فشلت العملية
-
-    def stop_server_clicked(self):
-        """
-        Handles the 'Stop Server' button click, running the server stop in a separate thread.
-        """
-        if not self.server.is_running():
-            QMessageBox.warning(self, "Warning", "Server is not running.")
-            self.update_ui_state()
-            return
-
-        self.append_log("Attempting to stop server in background...")
-
-        # تعطيل زر الإيقاف لمنع النقرات المتعددة أثناء العملية
-        self.stop_button.setEnabled(False)
-        self.start_button.setEnabled(False)
-
-        # تهيئة QThread و Worker لإيقاف الخادم
-        self.stop_thread = QThread()
-        self.stop_worker = ServerStopper(self.server)
-        self.stop_worker.moveToThread(self.stop_thread)
-
-        # ربط الإشارات (signals)
-        self.stop_thread.started.connect(self.stop_worker.stop_server)
-        self.stop_worker.finished.connect(self.on_server_stopped)
-        self.stop_worker.error.connect(self.on_server_stop_error)
-        self.stop_worker.finished.connect(self.stop_thread.quit) # إيقاف الـ thread بعد انتهاء الـ worker
-        self.stop_worker.deleteLater() # حذف الـ worker عندما لا يكون مطلوبًا بعد الآن
-        self.stop_thread.finished.connect(self.stop_thread.deleteLater) # حذف الـ thread عندما ينتهي
-
-        self.stop_thread.start()
-
-    def on_server_stopped(self):
-        """
-        تُستدعى بعد انتهاء عملية إيقاف الخادم.
-        """
-        self.update_ui_state() # تحديث الواجهة الرسومية تلقائيًا بناءً على حالة الخادم الفعلية
-        # رسالة "تم إيقاف الخادم بنجاح" يتم إرسالها من Worker نفسه في web_server.py
-
-    def on_server_stop_error(self, message):
-        """
-        تُستدعى في حالة حدوث خطأ أثناء إيقاف الخادم.
-        """
-        QMessageBox.critical(self, "Server Stop Error", message)
-        self.update_ui_state() # تحديث الواجهة الرسومية حتى لو فشلت العملية
-
-
-    def update_ui_state(self):
-        """
-        Updates the state of UI elements based on server status and folder selection.
-        """
-        is_running = self.server.is_running()
-        has_folder = bool(self.selected_folder)
-
-        # تمكين/تعطيل الأزرار بناءً على حالة الخادم واختيار المجلد
-        self.start_button.setEnabled(not is_running and has_folder)
-        self.stop_button.setEnabled(is_running)
-        self.open_folder_button.setEnabled(has_folder)
-
-        self.port_input.setEnabled(not is_running)
-        self.server_type_combo.setEnabled(not is_running)
-
-        if is_running:
-            self.status_label.setText(f"Status: Running (Port: {self.server.port}, Type: {self.server.server_type})")
-            
-            # عرض روابط متعددة (localhost و IP)
-            addresses = self.server.get_local_and_ip_addresses()
-            if addresses:
-                address_html = "<b>Access Server:</b><br>"
-                # عرض localhost أولاً
-                address_html += f'Local (This PC): <a href="{addresses[0]}">{addresses[0]}</a><br>'
-                # عرض عنوان IP المحلي إذا كان مختلفًا
-                if len(addresses) > 1 and addresses[0] != addresses[1]:
-                    address_html += f'Network (Other Devices): <a href="{addresses[1]}">{addresses[1]}</a>'
-                else: # في حالة أن الـ IP المحلي هو نفسه localhost (مثل عندما لا يكون هناك اتصال بالشبكة)
-                    address_html += f'Network: <a href="{addresses[0]}">{addresses[0]}</a> (Same as Local)'
-
-                self.address_label.setText(address_html.strip())
-            else:
-                self.address_label.setText("Address: Not Available")
-            
-            # ربط open_link بـ address_label فقط عند الحاجة، لأنه يمكن أن يكون هناك روابط متعددة
-            self.address_label.linkActivated.connect(self.open_link)
-        else:
-            self.status_label.setText("Status: Stopped")
-            self.address_label.setText("Address: Not Available")
-
-    def open_link(self, link):
-        """
-        Opens a given URL in the default web browser.
-        """
-        QDesktopServices.openUrl(QUrl(link))
-
-    def append_log(self, message):
-        """
-        Appends a message to the log text edit area.
-        """
-        self.log_text_edit.append(message)
-        self.log_text_edit.verticalScrollBar().setValue(self.log_text_edit.verticalScrollBar().maximum())
-
-    def closeEvent(self, event):
-        """
-        Handles the window close event to ensure the server is stopped and threads are properly terminated.
-        This version is non-blocking for a smoother exit.
-        """
-        # إذا كان الخادم يعمل، اسأل المستخدم إذا أراد إيقافه
-        if self.server.is_running():
-            reply = QMessageBox.question(self, 'Stop Server?',
-                                         "The server is still running. Do you want to stop it before closing?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply == QMessageBox.No:
-                event.ignore() # إذا اختار المستخدم لا، لا تغلق التطبيق
-                return
-
-            # إذا اختار المستخدم نعم، أو إذا لم يكن الخادم يعمل أصلاً
-            # نستخدم try-except للتعامل بأمان مع حالة أن الـ thread قد يكون تم حذفه
-            stop_thread_is_running = False
-            if self.stop_thread is not None:
-                try:
-                    stop_thread_is_running = isinstance(self.stop_thread, QThread) and self.stop_thread.isRunning()
-                except RuntimeError:
-                    # إذا حدث هذا الخطأ، فهذا يعني أن الكائن قد تم حذفه بالفعل.
-                    # نعتبره غير قيد التشغيل ونمضي قدمًا.
-                    stop_thread_is_running = False
-                    self.stop_thread = None # إعادة تعيينه لتجنب محاولات الوصول المستقبلية
-
-            if not stop_thread_is_running: # إذا لم يكن الـ thread قيد التشغيل أو كان محذوفًا
-                self.stop_thread = QThread()
-                self.stop_worker = ServerStopper(self.server)
-                self.stop_worker.moveToThread(self.stop_thread)
-
-                # ربط الإشارات: عند بدء الـ thread، ابدأ العامل (worker)
-                self.stop_thread.started.connect(self.stop_worker.stop_server)
-                
-                # ربط إشارة انتهاء Worker بإنهاء الـ thread
-                self.stop_worker.finished.connect(self.stop_thread.quit) 
-                
-                # تنظيف الـ workers والـ threads
-                self.stop_worker.deleteLater() 
-                self.stop_thread.finished.connect(self.stop_thread.deleteLater) 
-                
-                self.append_log("Initiating background server stop. Application will close when finished.")
-                self.stop_thread.start() 
-
-                # الآن نسمح لـ closeEvent بالانتهاء فورًا،
-                # ونتوقع أن يتم إغلاق التطبيق بواسطة إشارة 'finished' من stop_worker (إذا قمت بربطها بـ QApplication.instance().quit في مكان آخر)
-                event.accept() 
-                return 
-
-            else:
-                # هذا السيناريو (Thread الإيقاف يعمل بالفعل) يجب أن يكون نادرًا عند الإغلاق المباشر
-                # إذا كان الخيط يعمل بالفعل، اسمح بالإغلاق، وافترض أنه سينهي نفسه لاحقًا
-                event.accept()
-                return
-
-        # إذا لم يكن السيرفر يعمل، أو إذا اختار المستخدم عدم إيقافه ووافقنا على الإغلاق
-        # التعامل مع QThread الخاص بالبدء (تنظيف احتياطي)
-        if self.start_thread is not None:
-            # تحقق مما إذا كان الكائن لا يزال QThread وصالحًا
-            try:
-                if isinstance(self.start_thread, QThread) and self.start_thread.isRunning():
-                    self.start_thread.quit() 
-                    self.start_thread.wait(5000) # انتظر بحد أقصى 5 ثوانٍ
-            except RuntimeError:
-                pass # تجاهل الخطأ إذا حدث أثناء التنظيف (قد يكون تم حذفه بالفعل)
-            # بغض النظر عما إذا كان يعمل أو لا، قم بتنظيف المراجع
-            self.start_thread = None
-            self.start_worker = None
-
-        # خطوة أخيرة للتأكد من إيقاف الخادم الرئيسي (كإجراء احتياطي إذا لم يتم إيقافه بالـ thread)
-        if self.server.is_running() and self.server.httpd:
-            self.server.log_signal.emit("Attempting to force stop server before exiting.")
-            try:
-                self.server.httpd.shutdown()
-                self.server.httpd.server_close()
-                if self.server.server_thread and self.server.server_thread.is_alive():
-                    self.server.server_thread.join(timeout=5)
-            except Exception as e:
-                self.server.log_signal.emit(f"Error during force stop: {e}")
-            finally:
-                self.server.httpd = None
-                self.server.server_thread = None
-
-        event.accept()
-
     def show_help_dialog(self):
-        """
-        Displays a help dialog with instructions on how to use the server.
-        """
+        """Displays a detailed help guide."""
         help_text = """
-        <h3>Hel-Web-Server Usage Instructions:</h3>
-        <p>This application allows you to quickly start a local web server to serve files from a selected folder.</p>
+        <h3>Hel-Web-Server Usage Guide</h3>
         
-        <h4>1. Server Settings:</h4>
-        <ul>
-            <li><b>Project Folder:</b> Click "Select Folder" to choose the directory containing your web files (HTML, CSS, JS, images, etc.).</li>
-            <li><b>Open Folder:</b> Opens the currently selected project folder in your system's file explorer.</li>
-            <li><b>Port:</b> Enter the port number for the server. Common choices are 8000, 5500, etc. (Ports below 1024 often require administrator privileges).</li>
-            <li><b>Server Type:</b> Select the type of server. This typically corresponds to different Python modules (e.g., http.server, SimpleHTTPServer).</li>
-        </ul>
+        <h4>1. Project Folder:</h4>
+        <p>Click the <b>Browse</b> button to select the root directory of your web project (where your HTML, PHP, or Django/Flask code resides).</p>
         
-        <h4>2. Server Control:</h4>
+        <h4>2. Server Settings:</h4>
         <ul>
-            <li><b>Start Server:</b> Starts the web server using the selected folder, port, and server type.</li>
+            <li><b>Port:</b> Enter the desired port number (e.g., 8000).</li>
+            <li><b>Server Type:</b> Select the technology:
+                <ul>
+                    <li><b>Static Files:</b> For simple HTML/CSS/JS (uses Python's http.server).</li>
+                    <li><b>Flask/Django Application:</b> For Python web frameworks (requires correct project structure).</li>
+                    <li><b>PHP Built-in Server:</b> For PHP projects (requires PHP CLI installed on your system).</li>
+                </ul>
+            </li>
+            <li><b>Start Server:</b> Runs the selected server type in the background.</li>
             <li><b>Stop Server:</b> Stops the running web server.</li>
         </ul>
         
@@ -478,15 +341,27 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Hel-Web-Server Help", help_text)
 
     def show_about_dialog(self):
-        """
-        Displays an about dialog for the application.
-        """
+        """Displays an about dialog for the application."""
         about_text = """
         <h3>About Hel-Web-Server</h3>
-        <p>Version: 1.0.0</p>
+        <p>Version: 1.0.0 (with PHP Support)</p>
         <p>Developed by: Saeed Badrelden</p>
         <p>Hel-Web-Server is a simple local web server utility built with PyQt5.</p>
-        <p>Designed to help web developers quickly serve static files for testing purposes.</p>
-        <p>Copyright © 2025</p>
+        <p>Designed to help web developers quickly serve various project types for testing purposes.</p>
         """
-        QMessageBox.about(self, "About Hel-Web-Server", about_text)
+        QMessageBox.information(self, "About Hel-Web-Server", about_text)
+
+    def get_local_and_ip_addresses(self):
+        # تم نقل هذا المنطق إلى WebServer لضمان الاتساق (لكنه موجود هنا للاحتياط)
+        addresses = []
+        try:
+            local_ip = "127.0.0.1"
+            hostname = socket.gethostname()
+            ip_address = socket.gethostbyname(hostname)
+
+            addresses.append(f"http://{local_ip}:{self.current_port}")
+            if ip_address != local_ip:
+                addresses.append(f"http://{ip_address}:{self.current_port}")
+        except socket.error as e:
+            self.log_signal.emit(f"Error getting network addresses: {e}")
+        return addresses
