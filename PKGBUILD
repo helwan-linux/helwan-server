@@ -6,7 +6,7 @@ pkgdesc="A simple web server utility for Helwan Linux, supporting various server
 arch=('any')
 url="https://github.com/helwan-linux/helwan-server"
 license=('GPL')
-depends=('python' 'python-pyqt5' 'python-setuptools' 'desktop-file-utils')
+depends=('python' 'python-pyqt5' 'python-setuptools' 'desktop-file-utils' 'psmisc')
 
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/helwan-linux/helwan-server/archive/refs/heads/main.tar.gz")
 sha256sums=('SKIP')
